@@ -17,72 +17,82 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "ogs-core.h"
 #include "ogs-tun.h"
+#include <stdio.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
+#define SOCKET_PATH "/tmp/tun_service.sock"
+#define BUFFER_SIZE 4096
+#define COMMAND_BUFFER_SIZE 512
 #undef OGS_LOG_DOMAIN
 #define OGS_LOG_DOMAIN __ogs_sock_domain
 
-ogs_pkbuf_t *ogs_tun_read(ogs_socket_t fd, ogs_pkbuf_pool_t *packet_pool)
-{
-    ogs_pkbuf_t *recvbuf = NULL;
-    int n;
+// Modified ogs_tun_read
+ogs_pkbuf_t *ogs_tun_read(ogs_socket_t fd, ogs_pkbuf_pool_t *packet_pool) {
+  ogs_pkbuf_t *recvbuf = NULL;
+  char buffer[OGS_MAX_PKT_LEN + 64]; // Extra space for proxy headers
+  int proxy_fd;                      // Retrieve proxy_fd from mapping table
+  int n;
 
-    ogs_assert(fd != INVALID_SOCKET);
+  ogs_assert(fd != INVALID_SOCKET);
 
-    recvbuf = ogs_pkbuf_alloc(packet_pool, OGS_MAX_PKT_LEN);
-    ogs_assert(recvbuf);
-    ogs_pkbuf_reserve(recvbuf, OGS_TUN_MAX_HEADROOM);
-    ogs_pkbuf_put(recvbuf, OGS_MAX_PKT_LEN-OGS_TUN_MAX_HEADROOM);
+  // Retrieve the proxy_fd associated with this fd
+  proxy_fd = fd; // Assume fd is already mapped to proxy_fd
+  //ogs_log_message(OGS_LOG_INFO, errno, "the fd is %d", fd);
+  // Send read request to proxy
+  snprintf(buffer, sizeof(buffer), "READ %d\n", fd);
+  n = send(proxy_fd, buffer, strlen(buffer), 0);
+  if (n <= 0) {
+    ogs_log_message(OGS_LOG_ERROR, errno, "send() failed");
+    return NULL;
+  }
 
-    n = ogs_read(fd, recvbuf->data, recvbuf->len);
-    if (n <= 0) {
-        ogs_log_message(OGS_LOG_WARN, ogs_socket_errno, "ogs_read() failed");
-        ogs_pkbuf_free(recvbuf);
-        return NULL;
-    }
+  // Receive the raw IPv4 packet from proxy
+  n = recv(proxy_fd, buffer, sizeof(buffer), 0);
+  if (n <= 0) {
+    ogs_log_message(OGS_LOG_ERROR, errno, "recv() failed");
+    return NULL;
+  }
 
-    ogs_pkbuf_trim(recvbuf, n);
+  // Allocate and copy data into ogs_pkbuf_t
+  recvbuf = ogs_pkbuf_alloc(packet_pool, n);
+  ogs_assert(recvbuf);
+  memcpy(recvbuf->data, buffer, n);
+  ogs_pkbuf_put(recvbuf, n);
 
-#if defined(__APPLE__)
-    /* Remove Null/Loopback Header (4bytes) */
-    ogs_pkbuf_pull(recvbuf, 4);
-#endif
-
-    return recvbuf;
+  return recvbuf;
 }
 
-int ogs_tun_write(ogs_socket_t fd, ogs_pkbuf_t *pkbuf)
-{
-#if defined(__APPLE__)
-    uint8_t version;
-    uint32_t family;
-#endif
+// Modified ogs_tun_write
+int ogs_tun_write(ogs_socket_t fd, ogs_pkbuf_t *pkbuf) {
+  char buffer[OGS_MAX_PKT_LEN + 64]; // Extra space for proxy headers
+  int proxy_fd;                      // Retrieve proxy_fd from mapping table
+  int n;
 
-    ogs_assert(fd != INVALID_SOCKET);
-    ogs_assert(pkbuf);
+  ogs_assert(fd != INVALID_SOCKET);
+  ogs_assert(pkbuf);
 
-#if defined(__APPLE__)
-    version = (*((unsigned char *)pkbuf->data) >> 4) & 0xf;
+  // Retrieve the proxy_fd associated with this fd
+  proxy_fd = fd; // Assume fd is already mapped to proxy_fd
 
-    if (version == 4) {
-        family = htobe32(AF_INET);
-    } else if (version == 6) {
-        family = htobe32(AF_INET6);
-    } else {
-        ogs_error("Invalid packet [IP version:%d, Packet Length:%d]",
-                version, pkbuf->len);
-        ogs_log_hexdump(OGS_LOG_ERROR, pkbuf->data, pkbuf->len);
-        return OGS_ERROR;
-    }
+  // Send write request to proxy
+  snprintf(buffer, sizeof(buffer), "WRITE %d %d\n", fd, pkbuf->len);
+  n = send(proxy_fd, buffer, strlen(buffer), 0);
+  if (n <= 0) {
+    ogs_log_message(OGS_LOG_ERROR, errno, "send() failed");
+    return OGS_ERROR;
+  }
 
-    ogs_pkbuf_push(pkbuf, sizeof(family));
-    memcpy(pkbuf->data, &family, sizeof(family));
-#endif
+  // Send the actual packet data
+  n = send(proxy_fd, pkbuf->data, pkbuf->len, 0);
+  if (n <= 0) {
+    ogs_log_message(OGS_LOG_ERROR, errno, "send() failed");
+    return OGS_ERROR;
+  }
 
-    if (ogs_write(fd, pkbuf->data, pkbuf->len) <= 0) {
-        ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno, "ogs_write() failed");
-        return OGS_ERROR;
-    }
-
-    return OGS_OK;
+  return OGS_OK;
 }
