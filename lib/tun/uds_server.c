@@ -108,7 +108,7 @@ static void handle_client(int client_socket) {
       ssize_t data_received = recv(client_socket, buffer, length, 0);
       if (data_received <= 0) {
         perror("recv() failed");
-        send(client_socket, "WRITE_ERROR\n", 12, 0);
+        // send(client_socket, "WRITE_ERROR\n", 12, 0);
         continue;
       }
 
@@ -118,7 +118,7 @@ static void handle_client(int client_socket) {
         perror("write() failed");
         send(client_socket, "WRITE_ERROR\n", 12, 0);
       } else {
-        send(client_socket, "WRITE_OK\n", 9, 0);
+        // send(client_socket, "WRITE_OK\n", 9, 0);
       }
     } else if (strcmp(command, "CLOSE") == 0) {
       // Close the TUN/TAP device
