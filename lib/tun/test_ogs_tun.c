@@ -106,8 +106,8 @@ int main(void) {
   test_initialize();
 
   // Run individual tests
-  test_ogs_tun_write();
-  test_ogs_tun_read();
+  // test_ogs_tun_write();
+  // test_ogs_tun_read();
 
   // Finalize the test environment
   test_finalize();

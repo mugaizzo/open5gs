@@ -1,118 +1,121 @@
 /*
- * Copyright (C) 2019 by Sukchan Lee <acetcom@gmail.com>
- *
- * This file is part of Open5GS.
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU Affero General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * Proxy-based TUN implementation for restricted environments
  */
 
 #include "ogs-tun.h"
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #undef OGS_LOG_DOMAIN
 #define OGS_LOG_DOMAIN __ogs_sock_domain
 
-#include <arpa/inet.h>
-#include <errno.h>
-#include <string.h>
-#include <sys/socket.h>
+#define TUN_PROXY_SERVER_HOST "127.0.0.1" // Configure as needed
+#define TUN_PROXY_SERVER_PORT 9999
 
-// Define the proxy server details
-#define PROXY_SERVER_IP "127.0.0.1" // Replace with your proxy server IP
-#define PROXY_SERVER_PORT 12345     // Replace with your proxy server port
-
-// Helper function to connect to proxy server
-static int connect_to_proxy(void) {
-  int sockfd;
-  struct sockaddr_in proxy_addr;
-
-  sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sockfd < 0) {
-    ogs_log_message(OGS_LOG_ERROR, errno, "socket() failed");
-    return -1;
-  }
-
-  memset(&proxy_addr, 0, sizeof(proxy_addr));
-  proxy_addr.sin_family = AF_INET;
-  proxy_addr.sin_port = htons(PROXY_SERVER_PORT);
-
-  if (inet_pton(AF_INET, PROXY_SERVER_IP, &proxy_addr.sin_addr) <= 0) {
-    ogs_log_message(OGS_LOG_ERROR, errno, "Invalid proxy IP address");
-    close(sockfd);
-    return -1;
-  }
-
-  if (connect(sockfd, (struct sockaddr *)&proxy_addr, sizeof(proxy_addr)) < 0) {
-    ogs_log_message(OGS_LOG_ERROR, errno, "connect() to proxy failed");
-    close(sockfd);
-    return -1;
-  }
-
-  return sockfd;
-}
-
-// Modified ogs_tun_open
 ogs_socket_t ogs_tun_open(char *ifname, int len, int is_tap) {
   ogs_socket_t fd = INVALID_SOCKET;
-  int proxy_fd;
-  char buffer[128];
+  struct sockaddr_in server_addr;
   int rc;
 
   ogs_assert(ifname);
 
-  // Connect to the proxy server
-  proxy_fd = connect_to_proxy();
-  if (proxy_fd < 0) {
+  // Create TCP socket to proxy server
+  fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
+    ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
+                    "socket() failed for TUN proxy");
     return INVALID_SOCKET;
   }
 
-  // Send open request to proxy
-  snprintf(buffer, sizeof(buffer), "OPEN %s %d\n", ifname, is_tap);
-  rc = send(proxy_fd, buffer, strlen(buffer), 0);
-  if (rc <= 0) {
-    ogs_log_message(OGS_LOG_ERROR, errno, "send() failed");
-    close(proxy_fd);
+  // Set socket to non-blocking
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) {
+    ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno, "fcntl(F_GETFL) failed");
+    close(fd);
     return INVALID_SOCKET;
   }
 
-  // Receive the virtual file descriptor
-  rc = recv(proxy_fd, buffer, sizeof(buffer) - 1, 0);
-  if (rc <= 0) {
-    ogs_log_message(OGS_LOG_ERROR, errno, "recv() failed");
-    close(proxy_fd);
+  if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno, "fcntl(F_SETFL) failed");
+    close(fd);
     return INVALID_SOCKET;
   }
 
-  buffer[rc] = '\0';
-  fd = atoi(buffer); // The proxy returns a "virtual" file descriptor
+  // Connect to proxy server
+  memset(&server_addr, 0, sizeof(server_addr));
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_port = htons(TUN_PROXY_SERVER_PORT);
+  inet_pton(AF_INET, TUN_PROXY_SERVER_HOST, &server_addr.sin_addr);
 
-  if (fd <= 0) {
-    ogs_log_message(OGS_LOG_ERROR, errno, "Invalid fd from proxy");
-    close(proxy_fd);
+  rc = connect(fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
+  if (rc < 0 && errno != EINPROGRESS) {
+    ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
+                    "connect() failed to TUN proxy server");
+    close(fd);
     return INVALID_SOCKET;
   }
 
-  // Store the proxy_fd in a mapping table for use in read/write
-  // (You can use a static table or a hash map for this purpose)
+  // Send interface setup request to server
+  char setup_msg[256];
+  snprintf(setup_msg, sizeof(setup_msg), "SETUP:%s:%d\n", ifname, is_tap);
 
-  return proxy_fd;
+  // For non-blocking connect, we might need to wait
+  if (rc < 0 && errno == EINPROGRESS) {
+    fd_set write_fds;
+    struct timeval tv;
+    FD_ZERO(&write_fds);
+    FD_SET(fd, &write_fds);
+    tv.tv_sec = 5; // 5 second timeout
+    tv.tv_usec = 0;
+
+    rc = select(fd + 1, NULL, &write_fds, NULL, &tv);
+    if (rc <= 0) {
+      ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
+                      "connection timeout to TUN proxy server");
+      close(fd);
+      return INVALID_SOCKET;
+    }
+
+    // Check if connection succeeded
+    int error = 0;
+    socklen_t len = sizeof(error);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error) {
+      ogs_log_message(OGS_LOG_ERROR, error ? error : ogs_socket_errno,
+                      "connection failed to TUN proxy server");
+      close(fd);
+      return INVALID_SOCKET;
+    }
+  }
+
+  // Send setup message (handle partial writes)
+  ogs_info("Sending setup message: %s", setup_msg);
+  size_t to_send = strlen(setup_msg);
+  size_t total_sent = 0;
+  
+  while (total_sent < to_send) {
+    ssize_t sent = send(fd, setup_msg + total_sent, to_send - total_sent, 0);
+    if (sent < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        // Would block, try again after a short delay
+        usleep(10000);  // 10ms
+        continue;
+      }
+      ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
+                      "failed to send setup message");
+      close(fd);
+      return INVALID_SOCKET;
+    }
+    total_sent += sent;
+  }
+
+  ogs_info("TUN proxy connection established for interface: %s", ifname);
+  return fd;
 }
 
-/**
- * Set the IP address for the TUN interface (currently a placeholder).
- */
 int ogs_tun_set_ip(char *ifname, ogs_ipsubnet_t *gw, ogs_ipsubnet_t *sub) {
-  // Placeholder for setting IP on TUN interface
+  // IP configuration is handled by the proxy server
   return OGS_OK;
 }
