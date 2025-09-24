@@ -18,7 +18,6 @@
  */
 
 #include "ogs-core.h"
-#include "ogs-tun.h"
 
 #include <netdb.h>  /* For AI_PASSIVE */
 #include <signal.h> /* For signal handlers */
@@ -50,11 +49,11 @@ typedef struct tun_proxy_client_s {
   bool is_tap;
   bool setup_complete;
 
-  /* Buffer for partial reads */
-  uint8_t read_buffer[TUN_PROXY_BUFFER_SIZE];
-  uint32_t read_offset;
+  /* Buffer for data */
+  uint8_t buffer[TUN_PROXY_BUFFER_SIZE];
+  uint32_t buffer_len;
   uint32_t expected_len;
-  bool reading_header;
+  bool reading_length;
 } tun_proxy_client_t;
 
 typedef struct tun_proxy_context_s {
@@ -69,17 +68,15 @@ typedef struct tun_proxy_context_s {
 
 static tun_proxy_context_t g_proxy_ctx;
 
+/* Function prototypes */
+static void tun_proxy_event_handler(short when, ogs_socket_t fd, void *data);
 static tun_proxy_client_t *tun_proxy_client_create(ogs_socket_t client_fd);
-static void tun_proxy_client_handler(short when, ogs_socket_t fd, void *data);
 static void tun_proxy_client_destroy(tun_proxy_client_t *client);
-static int tun_proxy_client_setup_tun(tun_proxy_client_t *client,
-                                      const char *ifname, int is_tap);
-static void tun_proxy_server_accept_handler(short when, ogs_socket_t fd,
-                                            void *data);
-static void tun_proxy_tun_handler(short when, ogs_socket_t fd, void *data);
-static int tun_proxy_parse_setup_message(const char *msg, char *ifname,
-                                         int *is_tap);
+static int tun_proxy_setup_tun(tun_proxy_client_t *client, const char *ifname,
+                               int is_tap);
+static void signal_handler(int sig);
 
+/* Open a TUN/TAP device */
 static ogs_socket_t tun_proxy_open_tun(const char *ifname, int is_tap) {
   ogs_socket_t fd = INVALID_SOCKET;
   const char *dev = "/dev/net/tun";
@@ -126,6 +123,7 @@ static ogs_socket_t tun_proxy_open_tun(const char *ifname, int is_tap) {
   return fd;
 }
 
+/* Create a new client */
 static tun_proxy_client_t *tun_proxy_client_create(ogs_socket_t client_fd) {
   tun_proxy_client_t *client = NULL;
 
@@ -138,9 +136,8 @@ static tun_proxy_client_t *tun_proxy_client_create(ogs_socket_t client_fd) {
   client->client_fd = client_fd;
   client->tun_fd = INVALID_SOCKET;
   client->setup_complete = false;
-  client->reading_header = true;
-  client->expected_len = sizeof(uint32_t);
-  client->read_offset = 0;
+  client->reading_length = false;
+  client->buffer_len = 0;
 
   /* Set client socket to non-blocking */
   int flags = fcntl(client_fd, F_GETFL, 0);
@@ -150,7 +147,7 @@ static tun_proxy_client_t *tun_proxy_client_create(ogs_socket_t client_fd) {
 
   client->client_poll =
       ogs_pollset_add(g_proxy_ctx.pollset, OGS_POLLIN, client_fd,
-                      tun_proxy_client_handler, client);
+                      tun_proxy_event_handler, client);
   if (!client->client_poll) {
     ogs_error("Failed to add client to pollset");
     ogs_free(client);
@@ -163,6 +160,7 @@ static tun_proxy_client_t *tun_proxy_client_create(ogs_socket_t client_fd) {
   return client;
 }
 
+/* Destroy a client */
 static void tun_proxy_client_destroy(tun_proxy_client_t *client) {
   ogs_assert(client);
 
@@ -193,8 +191,9 @@ static void tun_proxy_client_destroy(tun_proxy_client_t *client) {
   ogs_free(client);
 }
 
-static int tun_proxy_client_setup_tun(tun_proxy_client_t *client,
-                                      const char *ifname, int is_tap) {
+/* Setup TUN interface for client */
+static int tun_proxy_setup_tun(tun_proxy_client_t *client, const char *ifname,
+                               int is_tap) {
   ogs_assert(client);
   ogs_assert(ifname);
 
@@ -214,7 +213,7 @@ static int tun_proxy_client_setup_tun(tun_proxy_client_t *client,
 
   client->tun_poll =
       ogs_pollset_add(g_proxy_ctx.pollset, OGS_POLLIN, client->tun_fd,
-                      tun_proxy_tun_handler, client);
+                      tun_proxy_event_handler, client);
   if (!client->tun_poll) {
     ogs_error("Failed to add TUN to pollset");
     close(client->tun_fd);
@@ -228,237 +227,246 @@ static int tun_proxy_client_setup_tun(tun_proxy_client_t *client,
   return OGS_OK;
 }
 
+/* Parse setup message from client */
 static int tun_proxy_parse_setup_message(const char *msg, char *ifname,
                                          int *is_tap) {
-  char *token;
-  char *msg_copy;
   int result = OGS_ERROR;
+  const char *prefix = "SETUP:";
+  size_t prefix_len = strlen(prefix);
 
   ogs_assert(msg);
   ogs_assert(ifname);
   ogs_assert(is_tap);
 
-  msg_copy = ogs_strdup(msg);
-  if (!msg_copy) {
-    ogs_error("ogs_strdup() failed");
+  /* Check for SETUP: prefix */
+  if (strncmp(msg, prefix, prefix_len) != 0) {
+    ogs_error("Invalid setup message format (missing SETUP: prefix)");
     return OGS_ERROR;
   }
 
-  /* Parse "SETUP:ifname:is_tap\n" */
-  token = strtok(msg_copy, ":");
-  if (token && strcmp(token, "SETUP") == 0) {
-    token = strtok(NULL, ":");
-    if (token) {
-      strncpy(ifname, token, IFNAMSIZ - 1);
-      ifname[IFNAMSIZ - 1] = '\0';
+  /* Find the first colon after prefix */
+  const char *ifname_start = msg + prefix_len;
+  const char *colon = strchr(ifname_start, ':');
 
-      token = strtok(NULL, ":\n");
-      if (token) {
-        *is_tap = atoi(token);
-        result = OGS_OK;
-      }
-    }
+  if (!colon) {
+    ogs_error(
+        "Invalid setup message format (missing colon after interface name)");
+    return OGS_ERROR;
   }
 
-  ogs_free(msg_copy);
-  return result;
+  /* Copy the interface name */
+  size_t ifname_len = colon - ifname_start;
+  if (ifname_len >= IFNAMSIZ) {
+    ogs_error("Interface name too long");
+    return OGS_ERROR;
+  }
+
+  memcpy(ifname, ifname_start, ifname_len);
+  ifname[ifname_len] = '\0';
+
+  /* Parse is_tap value */
+  *is_tap = atoi(colon + 1);
+
+  return OGS_OK;
 }
 
-static void tun_proxy_server_accept_handler(short when, ogs_socket_t fd,
-                                            void *data) {
-  ogs_sock_t *new_sock = NULL;
-  tun_proxy_client_t *client = NULL;
-
-  ogs_assert(when == OGS_POLLIN);
-  ogs_assert(fd == g_proxy_ctx.server_sock->fd);
-
-  new_sock = ogs_sock_accept(g_proxy_ctx.server_sock);
-  if (!new_sock) {
-    ogs_warn("Failed to accept client connection");
-    return;
-  }
-
-  client = tun_proxy_client_create(new_sock->fd);
-  if (!client) {
-    ogs_error("Failed to create client context");
-    ogs_sock_destroy(new_sock);
-    return;
-  }
-
-  /* Don't destroy new_sock - fd is now managed by client */
-  ogs_free(new_sock);
-}
-
-static void tun_proxy_client_handler(short when, ogs_socket_t fd, void *data) {
+/* Handle events for both server, client and TUN */
+static void tun_proxy_event_handler(short when, ogs_socket_t fd, void *data) {
   tun_proxy_client_t *client = data;
-  ssize_t received;
-  uint32_t packet_len;
-  bool client_disconnected = false;
+  ssize_t bytes;
+  uint32_t len_network, len_host;
 
-  ogs_assert(client);
-  ogs_assert(fd == client->client_fd);
-
-  if (when & OGS_POLLIN) {
-    while (true) {
-      if (client->reading_header) {
-        /* Read length header */
-        received = ogs_recv(
-            client->client_fd, client->read_buffer + client->read_offset,
-            /* change client->expected_len  */ client->expected_len -
-                client->read_offset,
-            0);
-
-        ogs_info("Received raw setup message: %s", (char *)client->read_buffer);
-        if (received <= 0) {
-          if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return; /* No more data */
-          }
-          ogs_info("Client disconnected (fd=%d)", client->client_fd);
-          client_disconnected = true;
-          break;
-        }
-
-        client->read_offset += received;
-
-        if (client->read_offset >= client->expected_len) {
-          if (!client->setup_complete) {
-            /* This is setup message */
-            client->read_buffer[client->read_offset] = '\0';
-
-            char ifname[IFNAMSIZ];
-            int is_tap;
-
-            if (tun_proxy_parse_setup_message((char *)client->read_buffer,
-                                              ifname, &is_tap) == OGS_OK) {
-              if (tun_proxy_client_setup_tun(client, ifname, is_tap) ==
-                  OGS_OK) {
-                ogs_info("Client setup complete: %s", ifname);
-              } else {
-                ogs_error("TUN setup failed for client");
-                client_disconnected = true;
-                break;
-              }
-            } else {
-              ogs_error("Invalid setup message from client");
-              client_disconnected = true;
-              break;
-            }
-
-            /* Reset for packet reading */
-            client->reading_header = true;
-            client->expected_len = sizeof(uint32_t);
-            client->read_offset = 0;
-          } else {
-            /* Got length header */
-            memcpy(&packet_len, client->read_buffer, sizeof(packet_len));
-            packet_len = ntohl(packet_len);
-
-            if (packet_len > TUN_PROXY_BUFFER_SIZE - sizeof(uint32_t)) {
-              ogs_error("Packet too large: %u", packet_len);
-              client_disconnected = true;
-              break;
-            }
-
-            client->reading_header = false;
-            client->expected_len = packet_len;
-            client->read_offset = 0;
-          }
-        }
-      } else {
-        /* Read packet data */
-        received = ogs_recv(client->client_fd,
-                            client->read_buffer + client->read_offset,
-                            client->expected_len - client->read_offset, 0);
-
-        if (received <= 0) {
-          if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return; /* No more data */
-          }
-          ogs_info("Client disconnected (fd=%d)", client->client_fd);
-          client_disconnected = true;
-          break;
-        }
-
-        client->read_offset += received;
-
-        if (client->read_offset >= client->expected_len) {
-          /* Complete packet received, write to TUN */
-          if (client->tun_fd != INVALID_SOCKET) {
-            ssize_t written = ogs_write(client->tun_fd, client->read_buffer,
-                                        client->expected_len);
-            if (written < 0) {
-              ogs_log_message(OGS_LOG_WARN, ogs_socket_errno,
-                              "TUN write failed");
-            } else if (written != client->expected_len) {
-              ogs_warn("Partial TUN write: %zd/%u", written,
-                       client->expected_len);
-            }
-          }
-
-          /* Reset for next packet */
-          client->reading_header = true;
-          client->expected_len = sizeof(uint32_t);
-          client->read_offset = 0;
-        }
-      }
-    }
-  }
-
-  if (client_disconnected) {
-    tun_proxy_client_destroy(client);
-  }
-}
-
-static void tun_proxy_tun_handler(short when, ogs_socket_t fd, void *data) {
-  tun_proxy_client_t *client = data;
-  uint8_t buffer[TUN_PROXY_BUFFER_SIZE];
-  ssize_t bytes_read;
-  uint32_t packet_len_net;
-
-  ogs_assert(client);
-  ogs_assert(fd == client->tun_fd);
-
-  if (when & OGS_POLLIN) {
-    bytes_read = ogs_read(client->tun_fd, buffer, sizeof(buffer));
-    if (bytes_read <= 0) {
-      if (bytes_read < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        return; /* No data available */
-      }
-      ogs_log_message(OGS_LOG_WARN, ogs_socket_errno, "TUN read failed");
+  /* Server socket event (new connection) */
+  if (!client && fd == g_proxy_ctx.server_sock->fd) {
+    ogs_sock_t *new_sock = ogs_sock_accept(g_proxy_ctx.server_sock);
+    if (!new_sock) {
+      ogs_warn("Failed to accept client connection");
       return;
     }
 
-    if (client->client_fd != INVALID_SOCKET && client->setup_complete) {
-      /* Send length header first */
-      packet_len_net = htonl((uint32_t)bytes_read);
-      ssize_t sent = ogs_send(client->client_fd, &packet_len_net,
-                              sizeof(packet_len_net), 0);
-      if (sent != sizeof(packet_len_net)) {
-        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-          /* Client buffer full - should implement buffering */
-          ogs_warn("Client send buffer full");
+    tun_proxy_client_t *new_client = tun_proxy_client_create(new_sock->fd);
+    if (!new_client) {
+      ogs_error("Failed to create client context");
+      ogs_sock_destroy(new_sock);
+      return;
+    }
+
+    /* fd now managed by client */
+    ogs_free(new_sock);
+    return;
+  }
+
+  ogs_assert(client);
+
+  /* Handle client socket events */
+  if (fd == client->client_fd) {
+    if (when & OGS_POLLIN) {
+      if (!client->setup_complete) {
+        /* Reading setup message */
+        bytes = ogs_recv(fd, client->buffer + client->buffer_len,
+                         TUN_PROXY_BUFFER_SIZE - client->buffer_len - 1, 0);
+
+        if (bytes <= 0) {
+          if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+          }
+          ogs_info("Client disconnected during setup");
+          tun_proxy_client_destroy(client);
           return;
         }
-        ogs_log_message(OGS_LOG_WARN, ogs_socket_errno,
-                        "Failed to send length header");
+
+        client->buffer_len += bytes;
+        client->buffer[client->buffer_len] =
+            '\0'; /* Null terminate for string ops */
+
+        /* Check if we have a complete setup message (ending with newline) */
+        char *newline = memchr(client->buffer, '\n', client->buffer_len);
+        if (newline) {
+          *newline = '\0'; /* Replace newline with null terminator */
+
+          ogs_info("Received setup message: %s", client->buffer);
+
+          char ifname[IFNAMSIZ];
+          int is_tap;
+
+          if (tun_proxy_parse_setup_message((char *)client->buffer, ifname,
+                                            &is_tap) == OGS_OK) {
+            if (tun_proxy_setup_tun(client, ifname, is_tap) != OGS_OK) {
+              ogs_error("TUN setup failed");
+              tun_proxy_client_destroy(client);
+              return;
+            }
+          } else {
+            ogs_error("Invalid setup message");
+            tun_proxy_client_destroy(client);
+            return;
+          }
+
+          client->buffer_len = 0;
+          client->reading_length = true;
+        } else if (client->buffer_len >= TUN_PROXY_BUFFER_SIZE - 1) {
+          ogs_error("Setup message too long");
+          tun_proxy_client_destroy(client);
+          return;
+        }
+      } else if (client->reading_length) {
+        /* Reading packet length */
+        bytes = ogs_recv(fd, client->buffer + client->buffer_len,
+                         sizeof(uint32_t) - client->buffer_len, 0);
+
+        if (bytes <= 0) {
+          if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+          }
+          ogs_info("Client disconnected");
+          tun_proxy_client_destroy(client);
+          return;
+        }
+
+        client->buffer_len += bytes;
+
+        if (client->buffer_len == sizeof(uint32_t)) {
+          /* We have the complete length */
+          memcpy(&len_network, client->buffer, sizeof(uint32_t));
+          len_host = ntohl(len_network);
+
+          if (len_host > TUN_PROXY_BUFFER_SIZE) {
+            ogs_error("Packet too large: %u", len_host);
+            tun_proxy_client_destroy(client);
+            return;
+          }
+
+          client->expected_len = len_host;
+          client->buffer_len = 0;
+          client->reading_length = false;
+        }
+      } else {
+        /* Reading packet data */
+        bytes = ogs_recv(fd, client->buffer + client->buffer_len,
+                         client->expected_len - client->buffer_len, 0);
+
+        if (bytes <= 0) {
+          if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return;
+          }
+          ogs_info("Client disconnected");
+          tun_proxy_client_destroy(client);
+          return;
+        }
+
+        client->buffer_len += bytes;
+
+        if (client->buffer_len == client->expected_len) {
+          /* Write complete packet to TUN */
+          bytes = ogs_write(client->tun_fd, client->buffer, client->buffer_len);
+          if (bytes < 0) {
+            ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
+                            "TUN write failed");
+          } else if ((uint32_t)bytes != client->buffer_len) {
+            ogs_warn("Partial TUN write: %zd/%u", bytes, client->buffer_len);
+          }
+
+          /* Reset for next packet */
+          client->buffer_len = 0;
+          client->reading_length = true;
+        }
+      }
+    } else if (when & (POLL_HUP | POLL_ERR)) {
+      ogs_info("Client socket error or hangup");
+      tun_proxy_client_destroy(client);
+      return;
+    }
+  }
+  /* Handle TUN events */
+  else if (fd == client->tun_fd) {
+    if (when & OGS_POLLIN) {
+      /* Read packet from TUN */
+      bytes = ogs_read(client->tun_fd, client->buffer, TUN_PROXY_BUFFER_SIZE);
+
+      if (bytes <= 0) {
+        if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+          return;
+        }
+        ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno, "TUN read failed");
         return;
       }
 
-      /* Send packet data */
-      sent = ogs_send(client->client_fd, buffer, bytes_read, 0);
-      if (sent != bytes_read) {
-        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-          /* Client buffer full - should implement buffering */
-          ogs_warn("Client send buffer full");
+      /* Send packet to client: first length, then data */
+      len_host = (uint32_t)bytes;
+      len_network = htonl(len_host);
+
+      bytes = ogs_send(client->client_fd, &len_network, sizeof(len_network), 0);
+      if (bytes != sizeof(len_network)) {
+        if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+          ogs_warn("Client buffer full, packet dropped");
           return;
         }
-        ogs_log_message(OGS_LOG_WARN, ogs_socket_errno,
-                        "Failed to send packet data");
+        ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
+                        "Failed to send length header");
+        tun_proxy_client_destroy(client);
+        return;
       }
+
+      bytes = ogs_send(client->client_fd, client->buffer, len_host, 0);
+      if (bytes != (ssize_t)len_host) {
+        if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+          ogs_warn("Client buffer full, packet dropped");
+          return;
+        }
+        ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
+                        "Failed to send packet data");
+        tun_proxy_client_destroy(client);
+        return;
+      }
+    } else if (when & (POLL_HUP | POLL_ERR)) {
+      ogs_error("TUN device error");
+      tun_proxy_client_destroy(client);
+      return;
     }
   }
 }
 
+/* Initialize the proxy server */
 static int tun_proxy_server_init(int port) {
   int rv;
   ogs_sockaddr_t *addr = NULL;
@@ -485,9 +493,9 @@ static int tun_proxy_server_init(int port) {
     return OGS_ERROR;
   }
 
-  g_proxy_ctx.server_poll = ogs_pollset_add(
-      g_proxy_ctx.pollset, OGS_POLLIN, g_proxy_ctx.server_sock->fd,
-      tun_proxy_server_accept_handler, NULL);
+  g_proxy_ctx.server_poll = ogs_pollset_add(g_proxy_ctx.pollset, OGS_POLLIN,
+                                            g_proxy_ctx.server_sock->fd,
+                                            tun_proxy_event_handler, NULL);
 
   if (!g_proxy_ctx.server_poll) {
     ogs_error("Failed to add server to pollset");
@@ -503,6 +511,7 @@ static int tun_proxy_server_init(int port) {
   return OGS_OK;
 }
 
+/* Clean up server resources */
 static void tun_proxy_server_cleanup(void) {
   tun_proxy_client_t *client = NULL, *next_client = NULL;
 
@@ -531,6 +540,7 @@ static void tun_proxy_server_cleanup(void) {
   ogs_info("TUN proxy server shutdown complete");
 }
 
+/* Signal handler for clean shutdown */
 static void signal_handler(int sig) {
   ogs_info("Received signal %d, shutting down...", sig);
   g_proxy_ctx.running = false;
@@ -572,6 +582,7 @@ int main(int argc, char **argv) {
   }
 
   tun_proxy_server_cleanup();
+  ogs_core_terminate();
 
   return EXIT_SUCCESS;
 }
