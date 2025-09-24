@@ -10,7 +10,7 @@ ogs_pkbuf_t *ogs_tun_read(ogs_socket_t fd, ogs_pkbuf_pool_t *packet_pool) {
   ogs_assert(fd != INVALID_SOCKET);
 
   // First, read the length header
-  n = ogs_read(fd, &packet_len, sizeof(packet_len));
+  n = ogs_recv(fd, &packet_len, sizeof(packet_len), 0);
   if (n <= 0) {
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
       return NULL; // No data available (non-blocking)
@@ -37,7 +37,7 @@ ogs_pkbuf_t *ogs_tun_read(ogs_socket_t fd, ogs_pkbuf_pool_t *packet_pool) {
   ogs_pkbuf_put(recvbuf, packet_len);
 
   // Read the actual packet data
-  n = ogs_read(fd, recvbuf->data, packet_len);
+  n = ogs_recv(fd, recvbuf->data, packet_len, 0);
   if (n != packet_len) {
     ogs_log_message(OGS_LOG_WARN, ogs_socket_errno,
                     "incomplete packet read: expected %d, got %d", packet_len,
