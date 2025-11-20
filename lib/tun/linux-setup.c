@@ -6,7 +6,9 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #include <unistd.h>
 
 #undef OGS_LOG_DOMAIN
@@ -27,6 +29,15 @@ ogs_socket_t ogs_tun_open(char *ifname, int len, int is_tap) {
   if (fd < 0) {
     ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
                     "socket() failed for TUN proxy");
+    return INVALID_SOCKET;
+  }
+
+  // Set TCP_NODELAY to disable Nagle's algorithm
+  int optval = 1;
+  if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &optval, sizeof(optval)) < 0) {
+    ogs_log_message(OGS_LOG_ERROR, ogs_socket_errno,
+                    "setsockopt(TCP_NODELAY) failed");
+    close(fd);
     return INVALID_SOCKET;
   }
 

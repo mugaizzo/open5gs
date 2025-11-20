@@ -230,7 +230,6 @@ static int tun_proxy_setup_tun(tun_proxy_client_t *client, const char *ifname,
 /* Parse setup message from client */
 static int tun_proxy_parse_setup_message(const char *msg, char *ifname,
                                          int *is_tap) {
-  int result = OGS_ERROR;
   const char *prefix = "SETUP:";
   size_t prefix_len = strlen(prefix);
 

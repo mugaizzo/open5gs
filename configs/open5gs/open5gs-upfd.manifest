@@ -1,0 +1,146 @@
+sgx.enclave_size = "4G"
+sgx.max_threads = 16
+libos.entrypoint = "/var/tmp/open5gs/install/bin/open5gs-upfd"
+loader.argv = ["/var/tmp/open5gs/install/bin/open5gs-upfd", "-c", "/var/tmp/open5gs/configs/open5gs/upfraas.yaml", "-l", "/var/log/upf.log" ]
+#loader.log_level = "debug"
+
+fs.root =  "file:/"
+
+fs.mounts = [
+{ path = "/var/tmp/open5gs/install/bin/open5gs-upfd", uri = "file:/var/tmp/open5gs/install/bin/open5gs-upfd" },
+{ path = "/var/tmp/open5gs/configs/open5gs/upfraas.yaml", uri = "file:/var/tmp/open5gs/configs/open5gs/upfraas.yaml" },
+    { path = "/var", uri = "file:/var", type ="chroot" },
+    { path = "/dev", uri = "file:/dev", type = "chroot" },
+    { path = "/proc", uri = "file:/proc", type = "chroot" },
+    { path = "/usr", uri = "file:/usr", type = "chroot" },
+    { path = "/lib", uri = "file:/lib", type = "chroot" },
+    { path = "/lib64", uri = "file:/lib64", type = "chroot" },
+    { path = "/sys", uri = "file:/sys", type = "chroot" },
+    { path = "/var/tmp/open5gs/install/lib/x86_64-linux-gnu", uri = "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu", type = "chroot" },
+    { path = "/usr/lib/x86_64-linux-gnu", uri = "file:/usr/lib/x86_64-linux-gnu", type = "chroot" },
+    { path = "/lib/x86_64-linux-gnu", uri = "file:/lib/x86_64-linux-gnu", type = "chroot" },
+]
+
+allowed_devices = [
+  { type = "char", major = 10, minor = 200, path = "/dev/net/tun", mount = true }
+]
+
+sys.allowed_capabilities = [
+  "CAP_NET_ADMIN",
+  "CAP_NET_RAW"
+]
+
+sgx.trusted_files = [
+    "file:/var/tmp/open5gs/install/bin/open5gs-upfd",
+    "file:/var/tmp/open5gs/configs/open5gs/upfraas.yaml",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libprom.so",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogsmetrics.so.2",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogsmetrics.so.2.7.6",
+    "file:/var/tmp/open5gs/install/var/log/open5gs/upf.log",
+    "file:/usr/lib/x86_64-linux-gnu/libmicrohttpd.so.12",
+    "file:/lib/x86_64-linux-gnu/libgnutls.so.30",
+    "file:/lib/x86_64-linux-gnu/libp11-kit.so.0",
+    "file:/lib/x86_64-linux-gnu/libffi.so.8",
+    "file:/lib/x86_64-linux-gnu/libidn2.so.0",
+    "file:/lib/x86_64-linux-gnu/libunistring.so.2",
+    "file:/lib/x86_64-linux-gnu/libtasn1.so.6",
+    "file:/lib/x86_64-linux-gnu/libnettle.so.8",
+    "file:/lib/x86_64-linux-gnu/libhogweed.so.6",
+    "file:/lib/x86_64-linux-gnu/libgmp.so.10",
+    "file:/lib64/ld-linux-x86-64.so.2",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogsapp.so.2",
+    "file:/lib/x86_64-linux-gnu/libyaml-0.so.2",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogsproto.so.2",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogscore.so.2",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogspfcp.so.2",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogsipfw.so.2",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogsgtp.so.2",
+    "file:/var/tmp/open5gs/install/lib/x86_64-linux-gnu/libogstun.so.2",
+    "file:/usr/lib/x86_64-linux-gnu/libtalloc.so.2",
+    "file:/lib/libtins.so.4.0",
+    "file:/lib/x86_64-linux-gnu/libpcap.so.0.8",
+    "file:/lib/x86_64-linux-gnu/libdbus-1.so.3",
+    "file:/lib/x86_64-linux-gnu/libsystemd.so.0",
+    "file:/lib/x86_64-linux-gnu/liblzma.so.5",
+    "file:/lib/x86_64-linux-gnu/libzstd.so.1",
+    "file:/lib/x86_64-linux-gnu/liblz4.so.1",
+    "file:/lib/x86_64-linux-gnu/libcap.so.2",
+    "file:/lib/x86_64-linux-gnu/libgcrypt.so.20",
+    "file:/lib/x86_64-linux-gnu/libgpg-error.so.0",
+    "file:/lib/x86_64-linux-gnu/libcrypto.so.3",
+    "file:/lib/x86_64-linux-gnu/libm.so.6",
+    "file:/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+    "file:/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+    "file:/usr/lib/x86_64-linux-gnu/libc.so.6",
+
+]
+
+
+sgx.allowed_files = [
+    "file:/var/tmp/open5gs/install/var/log/open5gs/upf.log",
+    "file:/var/log/upf.log",
+    "file:/usr/lib/x86_64-linux-gnu/libtalloc.so.2",
+    "file:/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+    "file:/usr/lib/x86_64-linux-gnu/libgcc_s.so.1",
+    "file:/usr/lib/x86_64-linux-gnu/libc.so.6",
+    "file:/usr/lib/x86_64-linux-gnu/libmicrohttpd.so.12",
+    "file:/dev/net/tun",
+    "file:/dev/sgx_enclave",
+    "file:/dev/sgx_provision",
+    "file:/dev/tty",
+    "file:/dev/null",
+    "file:/dev/urandom",
+    "file:/proc",
+    "file:/sys",
+]
+
+fs.insecure__allow_all_ioctls = true
+
+sys.allowed_ioctls = [
+  # TUN/TAP device setup
+  { request_code = 0x400454ca, struct = "ifreq" }, # TUNSETIFF
+  { request_code = 0x400454cb, struct = "int"    }, # TUNSETPERSIST
+  { request_code = 0x400454cc, struct = "int"    }, # TUNSETOWNER
+  { request_code = 0x400454ce, struct = "int"    }, # TUNSETGROUP
+  { request_code = 0x800454cf, struct = "int"    }, # TUNGETFEATURES
+
+  # Network interface flags and addresses
+  { request_code = 0x8913, struct = "ifreq" },     # SIOCGIFFLAGS
+  { request_code = 0x8914, struct = "ifreq" },     # SIOCSIFFLAGS
+  { request_code = 0x8915, struct = "ifreq" },     # SIOCGIFADDR
+  { request_code = 0x8916, struct = "ifreq" },     # SIOCSIFADDR
+  { request_code = 0x8917, struct = "ifreq" },     # SIOCGIFDSTADDR
+  { request_code = 0x8918, struct = "ifreq" },     # SIOCSIFDSTADDR
+  { request_code = 0x891b, struct = "ifreq" },     # SIOCGIFNETMASK
+  { request_code = 0x891c, struct = "ifreq" },     # SIOCSIFNETMASK
+  { request_code = 0x8922, struct = "ifreq" },     # SIOCSIFMTU
+  { request_code = 0x8921, struct = "ifreq" },     # SIOCGIFMTU
+
+  # MAC / HW address
+  { request_code = 0x8927, struct = "ifreq" },     # SIOCSIFHWADDR
+  { request_code = 0x8928, struct = "ifreq" },     # SIOCGIFHWADDR
+
+  # Interface index
+  { request_code = 0x8933, struct = "ifreq" },     # SIOCGIFINDEX
+
+  # Interface name by index (optional but useful)
+  { request_code = 0x8930, struct = "ifreq" },     # SIOCGIFNAME
+]
+
+
+sys.ioctl_structs.ifreq = [
+{ size = 40, direction = "inout" },
+]
+
+
+fs.insecure__allow_device = true
+fs.insecure__allow_socket = true
+
+
+
+sys.allowed_syscalls = [
+"practl",
+"rseq",
+"arch_prctl"
+]
+

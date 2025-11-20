@@ -14,13 +14,24 @@
 static ogs_socket_t global_fd = INVALID_SOCKET;
 static ogs_pkbuf_pool_t *packet_pool = NULL;
 
+// Helper function to get current time in microseconds
+static long long get_time_usec(void) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return ((long long)tv.tv_sec * 1000000LL) + tv.tv_usec;
+}
+
 // Initialize the test environment by opening the TUN interface
 static void test_initialize(void) {
   printf("Initializing test environment...\n");
 
+  long long start_time = get_time_usec();
   global_fd = ogs_tun_open((char *)TEST_IFNAME, strlen(TEST_IFNAME), 0);
+  long long end_time = get_time_usec();
+  long long delay_usec = end_time - start_time;
   assert(global_fd != INVALID_SOCKET);
   printf("ogs_tun_open passed. File descriptor: %d\n", global_fd);
+  printf("Open delay: %lld microseconds\n", delay_usec);
 }
 
 // Finalize the test environment by closing the TUN interface
@@ -39,7 +50,11 @@ static void test_ogs_tun_read(void) {
 
   // Read data from the TUN interface
   printf("Waiting for data from TUN interface...\n");
+  long long start_time = get_time_usec();
   ogs_pkbuf_t *recvbuf = ogs_tun_read(global_fd, packet_pool);
+  long long end_time = get_time_usec();
+  long long delay_usec = end_time - start_time;
+
   if (!recvbuf) {
     fprintf(stderr,
             "ogs_tun_read failed: No data received or error occurred\n");
@@ -47,6 +62,7 @@ static void test_ogs_tun_read(void) {
   }
   // Print the received packet data
   printf("[RECEIVED] Packet length: %d\n", recvbuf->len);
+  printf("Read delay: %lld microseconds\n", delay_usec);
   printf("Packet data:\n");
   int i;
   for (i = 0; i < recvbuf->len; i++) {
@@ -105,13 +121,18 @@ static void test_ogs_tun_write(void) {
   printf("Writing IPv4 packet to TUN interface...\n");
 
   // Write the packet to the TUN interface
+  long long start_time = get_time_usec();
   int result = ogs_tun_write(global_fd, &pkbuf);
+  long long end_time = get_time_usec();
+  long long delay_usec = end_time - start_time;
+
   if (result != OGS_OK) {
     fprintf(stderr, "ogs_tun_write failed\n");
     exit(EXIT_FAILURE);
   }
 
   printf("ogs_tun_write passed.\n");
+  printf("Write delay: %lld microseconds\n", delay_usec);
 }
 
 // Main test runner
